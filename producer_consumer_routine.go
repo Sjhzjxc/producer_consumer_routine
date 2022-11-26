@@ -5,49 +5,51 @@ import (
 	"sync"
 )
 
-type ProducerConsumer struct {
-	Wg            *sync.WaitGroup
-	Cancel        context.CancelFunc
-	Ctx           context.Context
-	Chan          chan interface{}
+type ProducerConsumerContent struct {
 	Producer      func(func(interface{}) bool)
 	ProducerCount int
 	Consumer      func(interface{})
 	ConsumerCount int
-	Params        map[string]interface{}
 }
 
-func NewProducerConsumer(producer func(func(interface{}) bool), consumer func(interface{}), chanCount, producerCount, consumerCount int, params map[string]interface{}) *ProducerConsumer {
+type ProducerConsumer struct {
+	wg       *sync.WaitGroup
+	Wg       *sync.WaitGroup
+	Cancel   context.CancelFunc
+	Ctx      context.Context
+	Chan     chan interface{}
+	Contents []ProducerConsumerContent
+	Params   map[string]interface{}
+	Status   int
+}
+
+func NewProducerConsumer(contents []ProducerConsumerContent, chanCount int, params map[string]interface{}) *ProducerConsumer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ProducerConsumer{
-		Wg:            &sync.WaitGroup{},
-		Cancel:        cancel,
-		Ctx:           ctx,
-		Chan:          make(chan interface{}, chanCount),
-		Producer:      producer,
-		ProducerCount: producerCount,
-		Consumer:      consumer,
-		ConsumerCount: consumerCount,
-		Params:        params,
+		wg:       &sync.WaitGroup{},
+		Wg:       &sync.WaitGroup{},
+		Cancel:   cancel,
+		Ctx:      ctx,
+		Chan:     make(chan interface{}, chanCount),
+		Contents: contents,
+		Params:   params,
 	}
 }
 
-func DefaultProducerConsumer(producer func(func(interface{}) bool), consumer func(interface{})) *ProducerConsumer {
+func DefaultProducerConsumer(contents []ProducerConsumerContent) *ProducerConsumer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ProducerConsumer{
-		Wg:            &sync.WaitGroup{},
-		Cancel:        cancel,
-		Ctx:           ctx,
-		Chan:          make(chan interface{}, 1),
-		Producer:      producer,
-		ProducerCount: 1,
-		Consumer:      consumer,
-		ConsumerCount: 1,
-		Params:        nil,
+		wg:       &sync.WaitGroup{},
+		Wg:       &sync.WaitGroup{},
+		Cancel:   cancel,
+		Ctx:      ctx,
+		Chan:     make(chan interface{}, 1),
+		Contents: contents,
+		Params:   nil,
 	}
 }
 
-func (c *ProducerConsumer) producer(worker func(func(interface{}) bool)) {
+func (c *ProducerConsumer) producer(worker func(func(interface{}) bool), count int) {
 	defer c.Defer()
 	isBreak := false
 
@@ -62,7 +64,7 @@ func (c *ProducerConsumer) producer(worker func(func(interface{}) bool)) {
 	})
 
 	if !isBreak {
-		c.SendNil()
+		c.SendNil(count)
 	}
 }
 
@@ -84,30 +86,44 @@ LOOP:
 }
 
 func (c *ProducerConsumer) Routine() {
-	for i := 0; i < c.ProducerCount; i++ {
-		c.Wg.Add(1)
-		//fmt.Println("wg.Add 1")
-		go c.producer(c.Producer)
+	if c.Ctx.Err() != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		c.Ctx = ctx
+		c.Cancel = cancel
 	}
-	for i := 0; i < c.ConsumerCount; i++ {
-		c.Wg.Add(1)
-		//fmt.Println("wg.Add 1")
-		go c.consumer(c.Consumer)
+	c.Wg.Add(len(c.Contents))
+	for _, content := range c.Contents {
+		c.wg.Add(content.ConsumerCount + content.ProducerCount)
+		for i := 0; i < content.ProducerCount; i++ {
+			go c.producer(content.Producer, content.ConsumerCount)
+		}
+		for i := 0; i < content.ConsumerCount; i++ {
+			go c.consumer(content.Consumer)
+		}
+		c.wg.Wait()
+		c.Wg.Done()
 	}
-	//fmt.Println("over111")
 	c.Wg.Wait()
 }
 
 func (c *ProducerConsumer) Defer() {
-	c.Wg.Done()
+	c.wg.Done()
 }
 
 func (c *ProducerConsumer) Close() {
-	close(c.Chan)
+	if c.Chan != nil {
+		close(c.Chan)
+		c.Chan = nil
+	}
 }
 
-func (c *ProducerConsumer) SendNil() {
-	for i := 0; i < c.ConsumerCount; i++ {
+func (c *ProducerConsumer) SetChanCount(count int) {
+	c.Close()
+	c.Chan = make(chan interface{}, count)
+}
+
+func (c *ProducerConsumer) SendNil(count int) {
+	for i := 0; i < count; i++ {
 		c.Chan <- nil
 	}
 }
